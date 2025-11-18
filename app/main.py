@@ -1,5 +1,7 @@
 import os
 import io
+import threading
+import subprocess
 from typing import List
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -16,6 +18,13 @@ from app.utils import simple_chunk
 from app.screening.db import init_db as screening_init_db
 from app.screening import routes as screening
 from app.smart_access import routes as smart_access
+try:
+    from app.accounts.db import init_db as accounts_init_db, get_session as accounts_session
+    from app.accounts.models import Project, ProjectMembership
+    from sqlmodel import select
+    _HAS_ACCOUNTS = True
+except Exception:
+    _HAS_ACCOUNTS = False
 
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -45,15 +54,31 @@ class MeResponse(BaseModel):
     dept: str
     project: str
 
+class ProjectsResponse(BaseModel):
+    projects: List[str]
+
 @app.on_event("startup")
 async def startup():
     ensure_collection()
     screening_init_db()
+    # init accounts DB if available
+    try:
+        if _HAS_ACCOUNTS:
+            accounts_init_db()
+    except Exception:
+        pass
     # prepare smart access collection
     try:
         smart_access.ensure_collection()
     except Exception:
         pass
+    # Try to start J.A.R.V.I.S vite dev server in background
+    def _start_jarvis():
+        try:
+            subprocess.Popen(["npm", "run", "dev"], cwd=os.path.join(os.getcwd(), "J.A.R.V.I.S"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    threading.Thread(target=_start_jarvis, daemon=True).start()
 
 @app.post("/auth/login", response_model=TokenResponse)
 async def login(form: OAuth2PasswordRequestForm = Depends()):
@@ -75,11 +100,50 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 async def me(user: User = Depends(get_current_user)):
     return MeResponse(username=user.username, role=user.role, level=user.level, dept=user.dept, project=user.project)
 
+@app.get("/projects", response_model=ProjectsResponse)
+async def get_projects(user: User = Depends(get_current_user)):
+    allowed = _allowed_projects_for_user(user)
+    return ProjectsResponse(projects=allowed)
+
+def _allowed_projects_for_user(user: User) -> List[str]:
+    """Derive list of projects user may access.
+    Prefer accounts DB memberships if available; otherwise fallback to env + user's project.
+    """
+    if _HAS_ACCOUNTS:
+        try:
+            with accounts_session() as s:
+                # Admin/manager: all projects
+                if user.role in {"manager", "admin"}:
+                    names = [p.name for p in s.exec(select(Project)).all()]
+                    if user.project and user.project not in names:
+                        names.append(user.project)
+                    return sorted(list(dict.fromkeys(names)))
+                # Staff: memberships only
+                mems = s.exec(select(ProjectMembership).where(ProjectMembership.username == user.username)).all()
+                names = [m.project_name for m in mems]
+                if not names and user.project:
+                    names = [user.project]
+                return sorted(list(dict.fromkeys(names)))
+        except Exception:
+            pass
+    # Fallback to env var
+    env_projects = os.getenv("PROJECTS", "")
+    available = [p.strip() for p in env_projects.split(",") if p.strip()]
+    if user.project and user.project not in available:
+        available.append(user.project)
+    if user.role in {"manager", "admin"}:
+        return sorted(list(dict.fromkeys(available)))
+    allowed = [p for p in available if p == user.project]
+    if not allowed and user.project:
+        allowed = [user.project]
+    return allowed
+
 @app.post("/documents", response_model=UploadResponse)
 async def upload_document(
     file: UploadFile = File(...),
     audience: str = Form(default="all"),  # one of: all, managers, employees, custom
     allow_roles_custom: str = Form(default=""),  # used when audience=custom, comma-separated roles
+    project_override: str | None = Form(default=None),  # optional: override user's project for tagging
     user: User = Depends(get_current_user)
 ):
     if not file.filename.lower().endswith(".txt"):
@@ -101,6 +165,12 @@ async def upload_document(
         roles_final = [r.strip() for r in allow_roles_custom.split(",") if r.strip()]
         if not roles_final:
             raise HTTPException(status_code=400, detail="Custom audience requires allow_roles_custom")
+    # Enforce project permission: only allow override if within allowed projects
+    allowed_projects = _allowed_projects_for_user(user)
+    desired_project = (project_override or user.project or "").strip() or user.project
+    if desired_project and desired_project not in allowed_projects:
+        raise HTTPException(status_code=403, detail="Not allowed to upload to this project")
+    project_final = desired_project
     payloads = [
         {
             "uploader": user.username,
@@ -108,7 +178,7 @@ async def upload_document(
             "uploader_level": user.level,
             "filename": file.filename,
             "dept": user.dept,
-            "project": user.project,
+            "project": project_final,
             "audience": audience,
             "allow_roles": roles_final,
         }
@@ -152,72 +222,108 @@ async def query(req: QueryRequest, user: User = Depends(get_current_user)):
     sources = [pair[1] for pair, score in reranked]
     return QueryResponse(answer=answer, sources=sources)
 
-@app.get("/", response_class=HTMLResponse)
+from fastapi.responses import RedirectResponse
+
+@app.get("/", response_class=RedirectResponse)
 async def root():
+    # Redirect to J.A.R.V.I.S dev server home
+    return RedirectResponse(url="http://localhost:5173/")
+
+
+@app.get("/demo", response_class=HTMLResponse)
+async def demo():
     return """
 <!doctype html>
 <html>
 <head>
   <meta charset='utf-8'/>
-  <title>Enterprise RAG Demo</title>
+  <title>J.A.R.V.I.S — Enterprise RAG</title>
   <style>
-    body{font-family:system-ui, sans-serif; max-width:900px; margin:40px auto;}
-    input,button,textarea{padding:8px; margin:6px 0; width:100%;}
+    :root{--bg:#000; --card:#0b0b0b; --muted:#9ca3af; --fg:#fff; --accent:#7A0000; --accent2:#520000; --border:#1f2937}
+    *{box-sizing:border-box}
+    body{font-family:system-ui, sans-serif; margin:0; background:var(--bg); color:var(--fg);}
+    a{color:var(--accent)}
+    .container{max-width:1100px; margin:0 auto; padding:24px}
     .row{display:flex; gap:12px}
     .col{flex:1}
-    pre{background:#f6f8fa; padding:12px;}
+    .card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px}
+    .muted{color:var(--muted)}
+    input,button,textarea,select{padding:10px 12px; margin:8px 0; width:100%; background:#0f0f10; color:var(--fg); border:1px solid var(--border); border-radius:10px}
+    button{background:var(--accent); border:none; cursor:pointer; transition:transform .08s ease, background .2s}
+    button:hover{background:var(--accent2)}
+    button:active{transform:translateY(1px)}
+    .btn-secondary{background:#111827}
+    .header{position:sticky; top:0; z-index:5; background:linear-gradient(180deg, rgba(0,0,0,.9), rgba(0,0,0,.6)); border-bottom:1px solid var(--border)}
+    .brand{display:flex; align-items:center; gap:12px}
+    .logo{width:40px; height:40px; border:2px solid var(--accent); border-radius:10px; display:flex; align-items:center; justify-content:center; font-weight:700}
+    .title{font-weight:900; letter-spacing:6px}
+    .grid{display:grid; grid-template-columns: 1fr; gap:16px}
+    .section-title{margin:0 0 8px 0}
+    /* Chat styles */
+    .chat{display:flex; flex-direction:column; gap:10px; height:420px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:12px; background:#0a0a0a}
+    .msg{max-width:80%; padding:10px 12px; border-radius:12px; line-height:1.4; white-space:pre-wrap}
+    .msg.user{background:#101010; border:1px solid var(--border); align-self:flex-end}
+    .msg.ai{background:#120606; border:1px solid #2a0a0a}
+    .msg .tag{display:block; font-size:12px; color:var(--muted); margin-bottom:4px}
+    .typing{display:inline-flex; gap:6px; align-items:center}
+    .dot{width:6px; height:6px; border-radius:50%; background:var(--muted); opacity:.4; animation:blink 1s infinite}
+    .dot:nth-child(2){animation-delay:.15s}
+    .dot:nth-child(3){animation-delay:.3s}
+    @keyframes blink{0%{opacity:.2} 50%{opacity:1} 100%{opacity:.2}}
+    pre{background:#0f0f10; padding:12px; border:1px solid var(--border); border-radius:10px;}
+    .pill{display:inline-block; padding:6px 10px; background:#120606; border:1px solid #2a0a0a; color:#fda4a4; border-radius:999px; font-size:12px}
+    .actions{display:flex; gap:8px}
+    .divider{height:1px; background:var(--border); margin:20px 0}
   </style>
 </head>
 <body>
-  <h1>Enterprise RAG Demo</h1>
-  <section id="login">
-    <h2>Login</h2>
-    <div class="row">
-      <div class="col">
-        <label>Username</label>
-        <input id="username" value="carol"/>
+  <div class="header">
+    <div class="container" style="display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 24px;">
+      <div class="brand">
+        <div class="logo">JR</div>
+        <div class="title">J.A.R.V.I.S</div>
       </div>
-      <div class="col">
-        <label>Password</label>
-        <input id="password" type="password" value="carol123"/>
+      <div class="actions">
+        <button class="btn-secondary" onclick="openScreening()">Screening Admin</button>
+        <button class="btn-secondary" onclick="openSmartAccess()">Smart Access</button>
       </div>
     </div>
-    <button onclick="login()">Login</button>
-    <div id="me"></div>
-    <div style="margin-top:8px">
-      <button onclick="openScreening()">Open Screening (admin)</button>
-      <button onclick="openSmartAccess()">Open Smart Access (admin)</button>
-    </div>
-  </section>
-  <hr/>
-  <section id="upload">
-    <h2>Upload .txt Document</h2>
-    <input type="file" id="file"/>
-    <div>
-      <label>Audience</label>
-      <select id="audience">
-        <option value="all">All</option>
-        <option value="managers">Managers only</option>
-        <option value="employees">Employees only</option>
-        <option value="custom">Custom roles</option>
-      </select>
-    </div>
-    <label>Custom roles (comma separated, used only if audience=custom)</label>
-    <input id="roles_custom" placeholder="e.g. manager,admin"/>
-    <button onclick="uploadDoc()">Upload</button>
-    <div id="uploadResult"></div>
-  </section>
-  <hr/>
-  <section id="query">
-    <h2>Query</h2>
-    <textarea id="q" rows="3" placeholder="Ask a question..."></textarea>
-    <button onclick="doQuery()">Search</button>
-    <h3>Answer</h3>
-    <pre id="answer"></pre>
-    <h3>Sources</h3>
-    <pre id="sources"></pre>
-  </section>
+  </div>
+  <div class="container" style="padding-top:24px">
+  <div class="grid">
+    <section id="query" class="card">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px">
+        <h2 class="section-title">Chat</h2>
+        <div style="display:flex; gap:8px; align-items:center">
+          <select id="projectSelect" title="Project" style="width:220px">
+            <option value="">Default Project</option>
+          </select>
+          <a id="uploadBtn" class="pill" href="#" onclick="openUpload(event)">Upload Documents</a>
+        </div>
+      </div>
+      <div id="chat" class="chat">
+        <div class="msg ai"><span class="tag">J.A.R.V.I.S</span>Ask me anything about your documents. I follow your role/level/dept/project.</div>
+      </div>
+      <div class="row">
+        <div class="col">
+          <textarea id="q" rows="2" placeholder="Type your question..."></textarea>
+        </div>
+        <div style="width:140px; display:flex; align-items:flex-end">
+          <button style="width:100%" onclick="doQuery()">Send</button>
+        </div>
+      </div>
+      <div class="divider"></div>
+      <h3 class="section-title">Sources</h3>
+      <pre id="sources"></pre>
+    </section>
+  </div>
+  </div>
 <script>
+// Accept token from URL and persist
+try{
+  const urlToken = new URLSearchParams(location.search).get('token');
+  if(urlToken){ localStorage.setItem('token', urlToken); }
+}catch(e){}
 let token = localStorage.getItem('token')||'';
 let deviceId = localStorage.getItem('device_id')||'';
 if(!deviceId){
@@ -230,19 +336,11 @@ let saMouseMoves = 0;
 let saKeyTimes = [];
 let saTimer = null;
 
-async function login(){
-  const form = new URLSearchParams();
-  form.append('username', document.getElementById('username').value);
-  form.append('password', document.getElementById('password').value);
-  form.append('grant_type', 'password');
-  const r = await fetch('/auth/login', {method:'POST', body: form});
-  if(!r.ok){ alert('login failed'); return; }
-  const data = await r.json();
-  token = data.access_token; localStorage.setItem('token', token);
+async function bootstrapUser(){
+  if(!token){ return; }
   const me = await fetch('/me', {headers:{'Authorization':'Bearer '+token}});
   const meTxt = await me.text();
-  document.getElementById('me').innerText = meTxt;
-  try { const m = JSON.parse(meTxt); employeeId = m.username || ''; } catch(e) { employeeId = document.getElementById('username').value; }
+  try { const m = JSON.parse(meTxt); employeeId = m.username || ''; await setupProjects(); } catch(e) { /* ignore */ }
   startSmartAccessCollector();
 }
 
@@ -308,24 +406,111 @@ async function sendSmartAccessEvent(sync=false){
   }catch(e){ /* ignore */ }
 }
 
-async function uploadDoc(){
-  const f = document.getElementById('file').files[0];
-  if(!f){ alert('select a .txt file'); return; }
-  const fd = new FormData();
-  fd.append('file', f);
-  fd.append('audience', document.getElementById('audience').value);
-  fd.append('allow_roles_custom', document.getElementById('roles_custom').value);
-  const r = await fetch('/documents', {method:'POST', headers:{'Authorization':'Bearer '+token}, body: fd});
-  document.getElementById('uploadResult').innerText = await r.text();
+function openUpload(e){
+  e.preventDefault();
+  const proj = document.getElementById('projectSelect').value||'';
+  const url = '/demo/upload?token='+encodeURIComponent(token)+'&project='+encodeURIComponent(proj);
+  window.open(url, '_blank');
 }
 
 async function doQuery(){
-  const r = await fetch('/query', {method:'POST', headers:{'Authorization':'Bearer '+token, 'Content-Type':'application/json'}, body: JSON.stringify({query: document.getElementById('q').value, top_k: 5})});
+  const chat = document.getElementById('chat');
+  const q = document.getElementById('q').value;
+  if(!q.trim()) return;
+  chat.insertAdjacentHTML('beforeend', `<div class="msg user"><span class="tag">You</span>${q.replace(/</g,'&lt;')}</div>`);
+  document.getElementById('q').value='';
+  const typing = document.createElement('div');
+  typing.className='msg ai';
+  typing.innerHTML = '<span class="tag">J.A.R.V.I.S</span><span class="typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>';
+  chat.appendChild(typing); chat.scrollTop = chat.scrollHeight;
+
+  const r = await fetch('/query', {method:'POST', headers:{'Authorization':'Bearer '+token, 'Content-Type':'application/json'}, body: JSON.stringify({query: q, top_k: 5})});
   const data = await r.json();
-  document.getElementById('answer').innerText = data.answer || '';
+  typing.remove();
+  const ans = (data.answer||'').replace(/</g,'&lt;');
+  chat.insertAdjacentHTML('beforeend', `<div class="msg ai"><span class="tag">J.A.R.V.I.S</span>${ans}</div>`);
   document.getElementById('sources').innerText = JSON.stringify(data.sources, null, 2);
+  chat.scrollTop = chat.scrollHeight;
 }
+bootstrapUser();
 </script>
+</body>
+</html>
+"""
+
+
+@app.get("/demo/upload", response_class=HTMLResponse)
+async def demo_upload():
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'/>
+  <title>Upload Documents — J.A.R.V.I.S</title>
+  <style>
+    :root{--bg:#000; --card:#0b0b0b; --muted:#9ca3af; --fg:#fff; --accent:#7A0000; --accent2:#520000; --border:#1f2937}
+    body{font-family:system-ui, sans-serif; margin:0; background:var(--bg); color:var(--fg)}
+    .container{max-width:800px; margin:40px auto; padding:24px}
+    .card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px}
+    input,button,textarea,select{padding:10px 12px; margin:8px 0; width:100%; background:#0f0f10; color:var(--fg); border:1px solid var(--border); border-radius:10px}
+    button{background:var(--accent); border:none; cursor:pointer}
+    .muted{color:var(--muted)}
+  </style>
+  <script>
+  let token='';
+  function getParam(n){ try{ return new URLSearchParams(location.search).get(n)||'' }catch(e){ return '' } }
+  async function init(){
+    const t = getParam('token'); if(t){ localStorage.setItem('token', t); }
+    token = localStorage.getItem('token')||'';
+    await populateProjects();
+    const proj = getParam('project'); if(proj){ const sel=document.getElementById('project'); for(const o of sel.options){ if(o.value===proj){ sel.value=proj; break; } } }
+  }
+  async function populateProjects(){
+    try{
+      const r = await fetch('/projects', {headers:{'Authorization':'Bearer '+token}});
+      if(!r.ok) return;
+      const data = await r.json();
+      const sel = document.getElementById('project');
+      sel.innerHTML='';
+      (data.projects||[]).forEach(p=>{
+        const opt = document.createElement('option'); opt.value=p; opt.textContent=p; sel.appendChild(opt);
+      });
+    }catch(e){}
+  }
+  async function upload(){
+    const f = document.getElementById('file').files[0]; if(!f){ alert('Choose a .txt file'); return; }
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('audience', document.getElementById('audience').value);
+    fd.append('allow_roles_custom', document.getElementById('roles_custom').value);
+    fd.append('project_override', document.getElementById('project').value);
+    const r = await fetch('/documents', {method:'POST', headers:{'Authorization':'Bearer '+token}, body: fd});
+    const txt = await r.text();
+    document.getElementById('result').innerText = txt;
+  }
+  </script>
+</head>
+<body onload="init()">
+  <div class="container">
+    <h1>Upload Documents</h1>
+    <div class="card">
+      <label>Project</label>
+      <select id="project"></select>
+      <label>Audience</label>
+      <select id="audience">
+        <option value="all">All</option>
+        <option value="managers">Managers only</option>
+        <option value="employees">Employees only</option>
+        <option value="custom">Custom roles</option>
+      </select>
+      <label>Custom roles (comma separated)</label>
+      <input id="roles_custom" placeholder="e.g. manager,admin"/>
+      <label>File (.txt)</label>
+      <input type="file" id="file"/>
+      <button onclick="upload()">Upload</button>
+      <pre class="muted" id="result"></pre>
+    </div>
+  </div>
 </body>
 </html>
 """

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from fastapi import APIRouter, Request, Form, HTTPException, UploadFile, File, Header, Depends
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
 from sqlmodel import select
 from typing import Optional
 import json
@@ -464,3 +464,79 @@ async def apply_submit(
     <p class='muted'><a href='/screening/apply/{public_id}'>Back</a></p>
     """
     return page("Application submitted", body)
+
+
+# === JSON APIs for React-native Interviewer UI ===
+
+@router.get("/api/jobs")
+async def api_list_jobs(admin: dict = Depends(admin_required)):
+    with get_session() as s:
+        jobs = s.exec(select(Job).order_by(Job.created_at.desc())).all()
+        # Preload candidate counts
+        counts: dict[str, int] = {}
+        for j in jobs:
+            cands_cnt = s.exec(select(Candidate).where(Candidate.job_id == j.id)).all()
+            counts[j.public_id] = len(cands_cnt)
+    out = []
+    for j in jobs:
+        out.append({
+            "title": j.title,
+            "public_id": j.public_id,
+            "description": j.description,
+            "constraints": j.constraints,
+            "created_at": j.created_at.isoformat(),
+            "candidate_count": counts.get(j.public_id, 0),
+        })
+    return {"jobs": out}
+
+
+@router.post("/api/jobs")
+async def api_create_job(payload: dict, admin: dict = Depends(admin_required)):
+    title = (payload.get("title") or "").strip()
+    description = (payload.get("description") or "").strip()
+    constraints = (payload.get("constraints") or None)
+    if not title or not description:
+        raise HTTPException(status_code=400, detail="title and description required")
+    job = Job(title=title, description=description, constraints=constraints)
+    with get_session() as s:
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+    return {"ok": True, "public_id": job.public_id}
+
+
+@router.get("/api/jobs/{public_id}/candidates")
+async def api_list_candidates(public_id: str, admin: dict = Depends(admin_required)):
+    with get_session() as s:
+        job = s.exec(select(Job).where(Job.public_id == public_id)).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        cands = s.exec(select(Candidate).where(Candidate.job_id == job.id).order_by(Candidate.created_at.desc())).all()
+    out = []
+    for c in cands:
+        out.append({
+            "candidate_public_id": c.candidate_public_id,
+            "name": c.name,
+            "email": c.email,
+            "status": c.status,
+            "score": c.score,
+            "fits": c.fits,
+            "created_at": c.created_at.isoformat(),
+            "summary": c.summary,
+        })
+    return {"job": {"title": job.title, "public_id": job.public_id}, "candidates": out}
+
+
+@router.post("/api/candidates/{cand_public_id}/status")
+async def api_update_status(cand_public_id: str, payload: dict, admin: dict = Depends(admin_required)):
+    to = (payload.get("to") or "").strip()
+    if to not in {"received", "under_review", "accepted", "rejected"}:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    with get_session() as s:
+        cand = s.exec(select(Candidate).where(Candidate.candidate_public_id == cand_public_id)).first()
+        if not cand:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        cand.status = to
+        s.add(cand)
+        s.commit()
+    return {"ok": True}

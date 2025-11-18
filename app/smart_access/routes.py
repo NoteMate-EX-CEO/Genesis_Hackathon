@@ -13,6 +13,7 @@ from app.embedding import embed_texts
 # Qdrant local helper (separate collection)
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
+import uuid
 
 SMART_COLLECTION = "smart_access"
 VECTOR_SIZE = 768
@@ -92,7 +93,7 @@ def get_employee_vectors(employee_id: str, days: int = 60) -> List[rest.ScoredPo
     flt = rest.Filter(
         must=[
             rest.FieldCondition(key="employee_id", match=rest.MatchValue(value=employee_id)),
-            rest.FieldCondition(key="ts_iso", range=rest.Range(gte=cutoff.isoformat())),
+            rest.FieldCondition(key="ts_epoch", range=rest.Range(gte=float(cutoff.timestamp()))),
         ]
     )
     # HACK: we don't know a query vector; use empty vector and filter-only search is not supported here.
@@ -117,8 +118,12 @@ def get_employee_vectors(employee_id: str, days: int = 60) -> List[rest.ScoredPo
 
 def upsert_event(vector: np.ndarray, payload: Dict[str, Any]):
     c = qclient()
+    # Avoid conflicting with Qdrant point ID field
+    payload = dict(payload)
+    if 'id' in payload:
+        payload.pop('id', None)
     pt = rest.PointStruct(
-        id=payload.get("event_id") or payload.get("ts_iso") or None,
+        id=str(uuid.uuid4()),
         vector=vector.tolist(),
         payload=payload,
     )
@@ -162,6 +167,12 @@ async def collect_event(event: Dict[str, Any], request: Request):
     ts = event.get("timestamp") or datetime.now(timezone.utc).isoformat()
     event["timestamp"] = ts
     event["ts_iso"] = ts
+    # compute epoch seconds for numeric filtering
+    try:
+        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        event["ts_epoch"] = dt.timestamp()
+    except Exception:
+        event["ts_epoch"] = datetime.now(timezone.utc).timestamp()
     # Infer UA/IP if missing
     if not event.get("user_agent"):
         event["user_agent"] = request.headers.get("user-agent", "")
@@ -185,8 +196,8 @@ async def collect_event(event: Dict[str, Any], request: Request):
     base_vecs: List[np.ndarray] = []
     for p in pts:
         try:
-            t = p.payload.get("ts_iso")
-            if t and t >= day_ago_30.isoformat():
+            te = p.payload.get("ts_epoch")
+            if te and float(te) >= day_ago_30.timestamp():
                 v = np.array(p.vector, dtype=float)
                 base_vecs.append(v)
         except Exception:

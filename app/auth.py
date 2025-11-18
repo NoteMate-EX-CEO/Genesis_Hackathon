@@ -3,6 +3,13 @@ import time
 from typing import Optional, Dict
 from jose import jwt, JWTError
 from passlib.context import CryptContext
+try:
+    from app.accounts.db import get_session as accounts_session
+    from app.accounts.models import UserAccount, ProjectMembership
+    from sqlmodel import select
+    _HAS_ACCOUNTS = True
+except Exception:
+    _HAS_ACCOUNTS = False
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev_secret_change_me")
 JWT_ALG = os.getenv("JWT_ALG", "HS256")
@@ -23,19 +30,26 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
 def authenticate_user(username: str, password: str) -> Optional[Dict]:
-    user = _USERS.get(username)
-    if not user:
+    # DB-backed auth (required)
+    if not _HAS_ACCOUNTS:
         return None
-    if not verify_password(password, user["password_hash"]):
-        return None
-    return {
-        "username": username,
-        "role": user["role"],
-        "level": user["level"],
-        "dept": user.get("dept", ""),
-        "project": user.get("project", ""),
-        "role_weight": ROLE_WEIGHT.get(user["role"], 0)
-    }
+    with accounts_session() as s:
+        acct = s.exec(select(UserAccount).where(UserAccount.username == username)).first()
+        if not acct:
+            return None
+        if not verify_password(password, acct.password_hash):
+            return None
+        # Pick first membership project if any
+        proj = s.exec(select(ProjectMembership).where(ProjectMembership.username == username)).first()
+        project = proj.project_name if proj else ""
+        return {
+            "username": username,
+            "role": acct.role,
+            "level": acct.level,
+            "dept": acct.dept or "",
+            "project": project,
+            "role_weight": ROLE_WEIGHT.get(acct.role, 0)
+        }
 
 def create_access_token(sub: str, role: str, level: int, dept: str, project: str) -> str:
     now = int(time.time())

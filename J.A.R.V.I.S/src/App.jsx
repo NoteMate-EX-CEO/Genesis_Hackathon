@@ -1,15 +1,16 @@
 import * as React from "react";
 import { useState, useEffect } from "react";
+import { Routes, Route, Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Menu, X, ArrowRight, Zap, Shield, Brain } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // MENU ITEMS
 const menuItems = [
-  { name: "Main", href: "#" },
+  { name: "Main", href: "/main" },
   { name: "Performance Monitor", href: "#" },
   { name: "Auto Team Assembler", href: "#" },
-  { name: "AI Interviewer", href: "#" },
+  { name: "AI Interviewer", href: "/interviewer" },
   { name: "Smart Access", href: "#" },
 ];
 
@@ -141,6 +142,8 @@ export const HeroSection = () => {
               <li key={i} className="relative group">
                 <a
                   href={item.href}
+                  target={item.target || undefined}
+                  rel={item.target === "_blank" ? "noopener noreferrer" : undefined}
                   className="text-sm text-gray-300 hover:text-white transition-colors duration-300"
                 >
                   {item.name}
@@ -180,6 +183,8 @@ export const HeroSection = () => {
               <li key={i}>
                 <a
                   href={item.href}
+                  target={item.target || undefined}
+                  rel={item.target === "_blank" ? "noopener noreferrer" : undefined}
                   className="text-gray-200 hover:text-[#7A0000] text-lg transition-colors"
                   onClick={() => setMenuOpen(false)}
                 >
@@ -219,12 +224,10 @@ export const HeroSection = () => {
           </p>
 
           <div className="flex flex-col sm:flex-row gap-4 justify-center items-center mb-12">
-            <Button size="lg" className="bg-[#7A0000] hover:bg-[#520000] text-white group">
-              <a href="#" className="flex items-center gap-2">
-                Start Building
-                <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-              </a>
-            </Button>
+            <Link to="/login" className="bg-[#7A0000] hover:bg-[#520000] text-white group px-5 py-3 rounded-md inline-flex items-center gap-2">
+              Start Building
+              <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+            </Link>
           </div>
 
           <div className="mt-16 lg:mt-24 w-full max-w-5xl mx-auto">
@@ -292,9 +295,9 @@ export const HeroSection = () => {
             <p className="text-xl text-gray-400 mb-8">
               Join thousands of teams already using J.A.R.V.I.S to ship better software faster.
             </p>
-            <Button size="lg" className="bg-[#7A0000] hover:bg-[#520000] text-white">
+            <Link to="/login" className="bg-[#7A0000] hover:bg-[#520000] text-white group px-5 py-3 rounded-md inline-flex items-center gap-2">
               Try A Demo
-            </Button>
+            </Link>
           </div>
         </div>
       </section>
@@ -302,13 +305,24 @@ export const HeroSection = () => {
       {/* FOOTER */}
       <footer className="border-t border-gray-800 py-8 px-6">
         <div className="max-w-7xl mx-auto text-center text-gray-500 text-sm">
-          © 2025 J.A.R.V.I.S. All rights reserved.
+          2025 J.A.R.V.I.S. All rights reserved.
         </div>
       </footer>
     </div>
   );
 };
 
+import Login from "./pages/Login.jsx";
+import Main from "./pages/Main.jsx";
+import Interviewer from "./pages/Interviewer.jsx";
+
 export default function App() {
-  return <HeroSection />;
+  return (
+    <Routes>
+      <Route path="/" element={<HeroSection />} />
+      <Route path="/login" element={<Login />} />
+      <Route path="/main" element={<Main />} />
+      <Route path="/interviewer" element={<Interviewer />} />
+    </Routes>
+  );
 }

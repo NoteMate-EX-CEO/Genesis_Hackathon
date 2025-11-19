@@ -17,6 +17,7 @@ import uuid
 
 SMART_COLLECTION = "smart_access"
 VECTOR_SIZE = 768
+_SMART_AVAILABLE = True
 
 _router_client: Optional[QdrantClient] = None
 
@@ -28,15 +29,21 @@ def qclient() -> QdrantClient:
         _router_client = QdrantClient(url=url, api_key=api_key, prefer_grpc=False, timeout=30.0)
     return _router_client
 
-def ensure_collection():
-    c = qclient()
-    existing = [col.name for col in c.get_collections().collections]
-    if SMART_COLLECTION not in existing:
-        c.create_collection(
-            collection_name=SMART_COLLECTION,
-            vectors_config=rest.VectorParams(size=VECTOR_SIZE, distance=rest.Distance.COSINE),
-            on_disk_payload=True,
-        )
+def ensure_collection() -> bool:
+    global _SMART_AVAILABLE
+    try:
+        c = qclient()
+        existing = [col.name for col in c.get_collections().collections]
+        if SMART_COLLECTION not in existing:
+            c.create_collection(
+                collection_name=SMART_COLLECTION,
+                vectors_config=rest.VectorParams(size=VECTOR_SIZE, distance=rest.Distance.COSINE),
+                on_disk_payload=True,
+            )
+        _SMART_AVAILABLE = True
+    except Exception:
+        _SMART_AVAILABLE = False
+    return _SMART_AVAILABLE
 
 # Admin dependency (accept header or ?token=)
 def admin_required(request: Request, authorization: str | None = Header(default=None)):
@@ -87,6 +94,8 @@ def cosine(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def get_employee_vectors(employee_id: str, days: int = 60) -> List[rest.ScoredPoint]:
+    if not ensure_collection():
+        return []
     c = qclient()
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=days)
@@ -117,6 +126,8 @@ def get_employee_vectors(employee_id: str, days: int = 60) -> List[rest.ScoredPo
 
 
 def upsert_event(vector: np.ndarray, payload: Dict[str, Any]):
+    if not ensure_collection():
+        return
     c = qclient()
     # Avoid conflicting with Qdrant point ID field
     payload = dict(payload)
@@ -133,13 +144,18 @@ def upsert_event(vector: np.ndarray, payload: Dict[str, Any]):
 def seen_device_before(employee_id: str, device_id: str) -> bool:
     if not device_id:
         return False
-    c = qclient()
-    flt = rest.Filter(must=[
-        rest.FieldCondition(key="employee_id", match=rest.MatchValue(value=employee_id)),
-        rest.FieldCondition(key="device_id", match=rest.MatchValue(value=device_id)),
-    ])
-    page = c.scroll(collection_name=SMART_COLLECTION, scroll_filter=flt, with_payload=False, with_vectors=False, limit=1)
-    return len(page[0]) > 0
+    if not ensure_collection():
+        return False
+    try:
+        c = qclient()
+        flt = rest.Filter(must=[
+            rest.FieldCondition(key="employee_id", match=rest.MatchValue(value=employee_id)),
+            rest.FieldCondition(key="device_id", match=rest.MatchValue(value=device_id)),
+        ])
+        page = c.scroll(collection_name=SMART_COLLECTION, scroll_filter=flt, with_payload=False, with_vectors=False, limit=1)
+        return len(page[0]) > 0
+    except Exception:
+        return False
 
 
 @router.post("/smart-access/collect")
@@ -159,7 +175,7 @@ async def collect_event(event: Dict[str, Any], request: Request):
       "timestamp": "2025-11-18T08:00:00Z"
     }
     """
-    ensure_collection()
+    ok = ensure_collection()
     # Normalize basics
     eid = (event.get("employee_id") or "").strip()
     if not eid:
@@ -190,21 +206,23 @@ async def collect_event(event: Dict[str, Any], request: Request):
 
     # Anomaly decision: need baseline from last 30 days
     pts = get_employee_vectors(eid, days=BASELINE_DAYS * 2)
-    # Only consider last BASELINE_DAYS days as baseline
     now = datetime.now(timezone.utc)
     day_ago_30 = now - timedelta(days=BASELINE_DAYS)
     base_vecs: List[np.ndarray] = []
+    base_days = set()
     for p in pts:
         try:
             te = p.payload.get("ts_epoch")
             if te and float(te) >= day_ago_30.timestamp():
                 v = np.array(p.vector, dtype=float)
                 base_vecs.append(v)
+                dkey = datetime.fromtimestamp(float(te), tz=timezone.utc).strftime('%Y-%m-%d')
+                base_days.add(dkey)
         except Exception:
             pass
     flagged = False
     score = None
-    if len(base_vecs) >= BASELINE_DAYS:
+    if len(base_days) >= BASELINE_DAYS and base_vecs:
         centroid = np.mean(np.stack(base_vecs, axis=0), axis=0)
         score = cosine(np.array(vec, dtype=float), centroid)
         if score < THRESHOLD:
@@ -218,8 +236,11 @@ async def collect_event(event: Dict[str, Any], request: Request):
         "score": score if score is not None else None,
         "ts_iso": ts,
     })
-    upsert_event(vec, payload)
-    return {"ok": True, "flagged": flagged, "score": score}
+    if ok:
+        upsert_event(vec, payload)
+        return {"ok": True, "flagged": flagged, "score": score, "stored": True}
+    else:
+        return {"ok": True, "flagged": False, "score": None, "stored": False}
 
 
 @router.get("/smart-access/check")
@@ -240,19 +261,60 @@ async def check_access(employee_id: str, request: Request):
 
 @router.get("/smart-access/admin/settings", response_class=HTMLResponse)
 async def settings_page(admin: dict = Depends(admin_required)):
-    body = f"""
-    <h1>Smart Access Settings</h1>
-    <form method='post'>
-      <input type='hidden' name='token' value='{admin['token']}'/>
-      <label>Threshold (cosine, 0-1)</label>
-      <input name='threshold' value='{THRESHOLD}'/>
-      <label>Baseline days</label>
-      <input name='baseline_days' value='{BASELINE_DAYS}'/>
-      <button type='submit'>Save</button>
-    </form>
-    <p class='muted'><a href='/smart-access/admin?token={admin['token']}'>&larr; Back</a></p>
+    themed = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'/>
+  <meta name='viewport' content='width=device-width, initial-scale=1'/>
+  <title>Smart Access • Settings</title>
+  <style>
+    :root{{--bg:#000;--card:#0b0b0c;--fg:#fff;--muted:#9ca3af;--border:#1f2937;--accent:#b91c1c}}
+    *{{box-sizing:border-box}}
+    body{{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial}}
+    .container{{max-width:900px;margin:40px auto;padding:0 16px}}
+    .header{{display:flex;align-items:center;justify-content:space-between;padding:8px 0}}
+    .brand{{display:flex;gap:10px;align-items:center}}
+    .logo{{width:32px;height:32px;border-radius:8px;background:var(--accent)}}
+    .title{{font-weight:700;letter-spacing:.08em}}
+    .card{{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px}}
+    label{{display:block;color:var(--muted);font-size:13px;margin:8px 0 6px}}
+    input{{width:100%;background:#0f0f10;color:var(--fg);border:1px solid var(--border);border-radius:10px;padding:10px}}
+    .btn{{display:inline-block;background:var(--accent);color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;border:none}}
+    a.btn.gray, .btn.gray{{background:#111827}}
+  </style>
+</head>
+  <body>
+  <div class='container'>
+    <div class='header'>
+      <div class='brand'><div class='logo'></div><div class='title'>J.A.R.V.I.S</div></div>
+      <nav class='actions' style='display:flex;gap:8px'>
+        <a class='btn gray' href='/'>Home</a>
+        <a class='btn gray' href='/smart-access/admin?token={admin['token']}'>Smart Access</a>
+        <a class='btn gray' href='/perf/ui'>Performance Meter</a>
+        <a class='btn gray' href='/autoteam'>Auto Team</a>
+        <a class='btn gray' href='/interviewer-advanced'>Advanced Interviewer</a>
+        <a class='btn gray' href='/screening/jobs?token={admin['token']}'>Screening Admin</a>
+      </nav>
+    </div>
+    <div class='card'>
+      <form method='post'>
+        <input type='hidden' name='token' value='{admin['token']}'/>
+        <label>Threshold (cosine, 0-1)</label>
+        <input name='threshold' value='{THRESHOLD}'/>
+        <label>Baseline days</label>
+        <input name='baseline_days' value='{BASELINE_DAYS}'/>
+        <div style='margin-top:12px'>
+          <button class='btn' type='submit'>Save</button>
+          <a class='btn gray' href='/smart-access/admin?token={admin['token']}'>Back</a>
+        </div>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
     """
-    return HTMLResponse(body)
+    return HTMLResponse(themed)
 
 
 @router.post("/smart-access/admin/settings", response_class=HTMLResponse)
@@ -319,22 +381,76 @@ async def admin_dashboard(admin: dict = Depends(admin_required), employee_id: Op
         next_offset = page[1]
         if not next_offset:
             break
+    # Themed output
     rows = []
     for it in items:
-        rows.append(f"<tr><td>{it['employee_id']}</td><td>{it['ts']}</td><td>{it['score'] if it['score'] is not None else 'N/A'}</td><td>{it['page']}</td><td>{it['device_id']}</td><td><a href='/smart-access/admin/user/{it['employee_id']}?token={admin['token']}'>View</a></td></tr>")
-    body = f"""
-    <h1>Smart Access: Flagged Events</h1>
-    <form method='get'>
-      <input type='hidden' name='token' value='{admin['token']}'/>
-      <input name='employee_id' placeholder='Filter by employee id' value='{employee_id or ''}'/>
-      <button type='submit'>Filter</button>
-    </form>
-    <table style='width:100%; border-collapse:collapse'>
-      <thead><tr><th>Employee</th><th>Time</th><th>Score</th><th>Page</th><th>Device</th><th>Actions</th></tr></thead>
-      <tbody>{''.join(rows) if rows else "<tr><td colspan='6'>No flagged events</td></tr>"}</tbody>
-    </table>
+        rows.append(
+            f"<tr>"
+            f"<td>{it['employee_id']}</td>"
+            f"<td>{it['ts']}</td>"
+            f"<td>{(it['score'] if it['score'] is not None else 'N/A')}</td>"
+            f"<td>{it['page']}</td>"
+            f"<td>{it['device_id']}</td>"
+            f"<td><a class='btn gray' href='/smart-access/admin/user/{it['employee_id']}?token={admin['token']}'>View</a></td>"
+            f"</tr>"
+        )
+    themed = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'/>
+  <meta name='viewport' content='width=device-width, initial-scale=1'/>
+  <title>Smart Access • Admin</title>
+  <style>
+    :root{{--bg:#000;--card:#0b0b0c;--fg:#fff;--muted:#9ca3af;--border:#1f2937;--accent:#b91c1c}}
+    *{{box-sizing:border-box}}
+    body{{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial}}
+    .container{{max-width:1100px;margin:40px auto;padding:0 16px}}
+    .header{{display:flex;align-items:center;justify-content:space-between;padding:8px 0}}
+    .brand{{display:flex;gap:10px;align-items:center}}
+    .logo{{width:32px;height:32px;border-radius:8px;background:var(--accent)}}
+    .title{{font-weight:700;letter-spacing:.08em}}
+    .card{{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;margin-top:10px}}
+    input{{width:100%;background:#0f0f10;color:var(--fg);border:1px solid var(--border);border-radius:10px;padding:10px}}
+    .btn{{display:inline-block;background:var(--accent);color:#fff;padding:8px 12px;border-radius:10px;text-decoration:none;border:none;font-size:13px}}
+    .btn.gray{{background:#111827;color:#fff}}
+    table{{width:100%;border-collapse:collapse}}
+    th,td{{text-align:left;padding:10px;border-bottom:1px solid var(--border)}}
+    thead th{{color:var(--muted);font-weight:600}}
+  </style>
+</head>
+  <body>
+  <div class='container'>
+    <div class='header'>
+      <div class='brand'><div class='logo'></div><div class='title'>J.A.R.V.I.S</div></div>
+      <nav class='actions' style='display:flex;gap:8px'>
+        <a class='btn gray' href='/'>Home</a>
+        <a class='btn gray' href='/smart-access/admin?token={admin['token']}'>Smart Access</a>
+        <a class='btn gray' href='/perf/ui'>Performance Meter</a>
+        <a class='btn gray' href='/autoteam'>Auto Team</a>
+        <a class='btn gray' href='/interviewer-advanced'>Advanced Interviewer</a>
+        <a class='btn gray' href='/screening/jobs?token={admin['token']}'>Screening Admin</a>
+      </nav>
+    </div>
+    <div class='card'>
+      <form method='get' style='display:flex;gap:10px;align-items:center'>
+        <input type='hidden' name='token' value='{admin['token']}'/>
+        <input name='employee_id' placeholder='Filter by employee id' value='{employee_id or ''}'/>
+        <button class='btn' type='submit'>Filter</button>
+        <a class='btn gray' href='/smart-access/admin/settings?token={admin['token']}'>Settings</a>
+      </form>
+    </div>
+    <div class='card'>
+      <table>
+        <thead><tr><th>Employee</th><th>Time</th><th>Score</th><th>Page</th><th>Device</th><th>Actions</th></tr></thead>
+        <tbody>{''.join(rows) if rows else "<tr><td colspan='6' style='color:#9ca3af'>No flagged events</td></tr>"}</tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>
     """
-    return HTMLResponse(body)
+    return HTMLResponse(themed)
 
 
 @router.get("/smart-access/admin/user/{employee_id}", response_class=HTMLResponse)
@@ -346,14 +462,61 @@ async def admin_user_detail(employee_id: str, admin: dict = Depends(admin_requir
     for p in pts_sorted:
         pl = p.payload or {}
         rows.append(
-            f"<tr><td>{pl.get('ts_iso')}</td><td>{pl.get('score') if pl.get('score') is not None else 'N/A'}</td><td>{'yes' if pl.get('flagged') else 'no'}</td><td>{pl.get('page')}</td><td><details><summary>summary</summary><pre>{(pl.get('summary') or '')}</pre></details></td></tr>"
+            f"<tr>"
+            f"<td>{pl.get('ts_iso')}</td>"
+            f"<td>{(pl.get('score') if pl.get('score') is not None else 'N/A')}</td>"
+            f"<td>{('yes' if pl.get('flagged') else 'no')}</td>"
+            f"<td>{pl.get('page')}</td>"
+            f"<td><details><summary>summary</summary><pre>{(pl.get('summary') or '')}</pre></details></td>"
+            f"</tr>"
         )
-    body = f"""
-    <h1>User Detail: {employee_id}</h1>
-    <p><a href='/smart-access/admin?token={admin['token']}'>&larr; Back</a></p>
-    <table style='width:100%; border-collapse:collapse'>
-      <thead><tr><th>Time</th><th>Score</th><th>Flagged</th><th>Page</th><th>Summary</th></tr></thead>
-      <tbody>{''.join(rows) if rows else "<tr><td colspan='5'>No events</td></tr>"}</tbody>
-    </table>
+    themed = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'/>
+  <meta name='viewport' content='width=device-width, initial-scale=1'/>
+  <title>Smart Access • {employee_id}</title>
+  <style>
+    :root{{--bg:#000;--card:#0b0b0c;--fg:#fff;--muted:#9ca3af;--border:#1f2937;--accent:#b91c1c}}
+    *{{box-sizing:border-box}}
+    body{{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial}}
+    .container{{max-width:1100px;margin:40px auto;padding:0 16px}}
+    .header{{display:flex;align-items:center;justify-content:space-between;padding:8px 0}}
+    .brand{{display:flex;gap:10px;align-items:center}}
+    .logo{{width:32px;height:32px;border-radius:8px;background:var(--accent)}}
+    .title{{font-weight:700;letter-spacing:.08em}}
+    .card{{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;margin-top:10px}}
+    table{{width:100%;border-collapse:collapse}}
+    th,td{{text-align:left;padding:10px;border-bottom:1px solid var(--border)}}
+    thead th{{color:var(--muted);font-weight:600}}
+    pre{{white-space:pre-wrap;background:#0f0f10;border:1px solid var(--border);border-radius:10px;padding:12px;color:var(--fg)}}
+    .btn{{display:inline-block;background:var(--accent);color:#fff;padding:8px 12px;border-radius:10px;text-decoration:none;border:none;font-size:13px}}
+    .btn.gray{{background:#111827;color:#fff}}
+  </style>
+</head>
+  <body>
+  <div class='container'>
+    <div class='header'>
+      <div class='brand'><div class='logo'></div><div class='title'>J.A.R.V.I.S</div></div>
+      <nav class='actions' style='display:flex;gap:8px'>
+        <a class='btn gray' href='/'>Home</a>
+        <a class='btn gray' href='/smart-access/admin?token={admin['token']}'>Smart Access</a>
+        <a class='btn gray' href='/perf/ui'>Performance Meter</a>
+        <a class='btn gray' href='/autoteam'>Auto Team</a>
+        <a class='btn gray' href='/interviewer-advanced'>Advanced Interviewer</a>
+        <a class='btn gray' href='/screening/jobs?token={admin['token']}'>Screening Admin</a>
+      </nav>
+    </div>
+    <div class='card'>
+      <h2 style='margin:0 0 8px'>User Detail: {employee_id}</h2>
+      <table>
+        <thead><tr><th>Time</th><th>Score</th><th>Flagged</th><th>Page</th><th>Summary</th></tr></thead>
+        <tbody>{''.join(rows) if rows else "<tr><td colspan='5' style='color:#9ca3af'>No events</td></tr>"}</tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>
     """
-    return HTMLResponse(body)
+    return HTMLResponse(themed)

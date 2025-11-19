@@ -11,6 +11,7 @@ export default function Interviewer() {
   const [selJob, setSelJob] = useState(null);
   const [cands, setCands] = useState([]);
   const [newJob, setNewJob] = useState({ title: '', description: '', constraints: '' });
+  const [expanded, setExpanded] = useState({});
   const [jobId, setJobId] = useState('');
 
   useEffect(() => {
@@ -38,6 +39,10 @@ export default function Interviewer() {
     if ((j.jobs || []).length && !selJob) {
       selectJob(j.jobs[0]);
     }
+  }
+
+  function toggleExpand(candId){
+    setExpanded(prev => ({ ...prev, [candId]: !prev[candId] }));
   }
 
   async function selectJob(job) {
@@ -104,33 +109,33 @@ export default function Interviewer() {
             <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-4">
               <div className="flex items-center justify-between mb-3">
                 <h2 className="font-medium">Jobs</h2>
-                <button onClick={loadJobs} className="px-3 py-1.5 rounded-md bg-neutral-800 hover:bg-neutral-700 text-sm">Refresh</button>
+                <div className="flex items-center gap-2">
+                  <button onClick={loadJobs} className="px-3 py-1.5 rounded-md bg-neutral-800 hover:bg-neutral-700 text-sm">Refresh</button>
+                  <Link to="/interviewer/new" className="px-3 py-1.5 rounded-md bg-red-600 hover:bg-red-500 text-sm">New Job</Link>
+                </div>
               </div>
               <ul className="divide-y divide-neutral-800">
                 {jobs.map(j => (
                   <li key={j.public_id} className={`py-3 cursor-pointer ${selJob && selJob.public_id===j.public_id ? 'bg-black' : ''}`} onClick={() => selectJob(j)}>
                     <div className="font-medium">{j.title}</div>
-                    <div className="text-neutral-400 text-xs">{j.public_id}</div>
+                    <div className="text-neutral-400 text-xs flex items-center gap-3">
+                      <span>{j.public_id}</span>
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900 border border-neutral-800">{j.candidate_count ?? 0} candidates</span>
+                    </div>
                   </li>
                 ))}
                 {!jobs.length && <li className="py-6 text-neutral-500 text-sm text-center">No jobs yet</li>}
               </ul>
             </div>
 
-            <form onSubmit={createJob} className="rounded-xl border border-neutral-800 bg-neutral-950 p-4 space-y-2">
-              <h3 className="font-medium">New Job</h3>
-              <input className="w-full px-3 py-2 rounded-md bg-black border border-neutral-800" placeholder="Title" value={newJob.title} onChange={e=>setNewJob(v=>({...v,title:e.target.value}))} required />
-              <textarea className="w-full px-3 py-2 rounded-md bg-black border border-neutral-800" placeholder="Description" rows={5} value={newJob.description} onChange={e=>setNewJob(v=>({...v,description:e.target.value}))} required />
-              <textarea className="w-full px-3 py-2 rounded-md bg-black border border-neutral-800" placeholder="Constraints (optional)" rows={3} value={newJob.constraints} onChange={e=>setNewJob(v=>({...v,constraints:e.target.value}))} />
-              <button className="px-3 py-2 rounded-md bg-red-600 hover:bg-red-500 text-sm" type="submit">Create</button>
-            </form>
+            {/* Creation moved to /interviewer/new */}
           </section>
 
           <section className="md:col-span-7 space-y-6">
             <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-4">
               <div className="flex items-center justify-between mb-3">
                 <h2 className="font-medium">Candidates {selJob ? `for ${selJob.title}` : ''}</h2>
-                {selJob && <a className="px-3 py-1.5 rounded-md bg-neutral-800 hover:bg-neutral-700 text-sm" href={`/screening/jobs/${encodeURIComponent(selJob.public_id)}/candidates?token=${encodeURIComponent(token)}`} target="_blank" rel="noreferrer">Open admin</a>}
+                {selJob && <a className="px-3 py-1.5 rounded-md bg-neutral-800 hover:bg-neutral-700 text-sm" href={`${API}/screening/jobs/${encodeURIComponent(selJob.public_id)}/candidates?token=${encodeURIComponent(token)}`} target="_blank" rel="noreferrer">Open admin</a>}
               </div>
               <table className="w-full text-sm">
                 <thead>
@@ -140,25 +145,42 @@ export default function Interviewer() {
                     <th className="py-2">Score</th>
                     <th className="py-2">Fits</th>
                     <th className="py-2">Status</th>
+                    <th className="py-2">Summary</th>
                     <th className="py-2">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-neutral-800">
                   {cands.map(c => (
-                    <tr key={c.candidate_public_id}>
-                      <td className="py-2">{c.name}</td>
-                      <td className="py-2 text-neutral-400">{c.email}</td>
-                      <td className="py-2">{c.score ?? 'N/A'}</td>
-                      <td className="py-2">{c.fits==null? 'N/A' : (c.fits ? 'Yes' : 'No')}</td>
-                      <td className="py-2">{c.status}</td>
-                      <td className="py-2 space-x-2">
-                        <button className="text-xs px-2 py-1 bg-neutral-800 rounded" onClick={()=>updateStatus(c.candidate_public_id,'under_review')}>Under review</button>
-                        <button className="text-xs px-2 py-1 bg-green-700 rounded" onClick={()=>updateStatus(c.candidate_public_id,'accepted')}>Accept</button>
-                        <button className="text-xs px-2 py-1 bg-red-700 rounded" onClick={()=>updateStatus(c.candidate_public_id,'rejected')}>Reject</button>
-                      </td>
-                    </tr>
+                    <React.Fragment key={c.candidate_public_id}>
+                      <tr>
+                        <td className="py-2">{c.name}</td>
+                        <td className="py-2 text-neutral-400">{c.email}</td>
+                        <td className="py-2">{c.score ?? 'N/A'}</td>
+                        <td className="py-2">{c.fits==null? 'N/A' : (c.fits ? 'Yes' : 'No')}</td>
+                        <td className="py-2">{c.status}</td>
+                        <td className="py-2">
+                          {c.summary ? (
+                            <button className="text-xs px-2 py-1 bg-neutral-800 rounded" onClick={()=>toggleExpand(c.candidate_public_id)}>
+                              {expanded[c.candidate_public_id] ? 'Hide' : 'View'}
+                            </button>
+                          ) : <span className="text-neutral-500">N/A</span>}
+                        </td>
+                        <td className="py-2 space-x-2">
+                          <button className="text-xs px-2 py-1 bg-neutral-800 rounded" onClick={()=>updateStatus(c.candidate_public_id,'under_review')}>Under review</button>
+                          <button className="text-xs px-2 py-1 bg-green-700 rounded" onClick={()=>updateStatus(c.candidate_public_id,'accepted')}>Accept</button>
+                          <button className="text-xs px-2 py-1 bg-red-700 rounded" onClick={()=>updateStatus(c.candidate_public_id,'rejected')}>Reject</button>
+                        </td>
+                      </tr>
+                      {expanded[c.candidate_public_id] && (
+                        <tr>
+                          <td colSpan={7} className="py-2">
+                            <div className="rounded border border-neutral-800 bg-black p-3 text-neutral-300 whitespace-pre-wrap">{c.summary}</div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   ))}
-                  {!cands.length && <tr><td className="py-10 text-center text-neutral-500" colSpan={6}>Select a job</td></tr>}
+                  {!cands.length && <tr><td className="py-10 text-center text-neutral-500" colSpan={7}>Select a job</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -168,7 +190,7 @@ export default function Interviewer() {
               <p className="text-neutral-400 text-sm mb-3">Open the public application form by Job Public ID.</p>
               <input value={jobId} onChange={e=>setJobId(e.target.value)} placeholder="e.g. abc123" className="w-full px-3 py-2 rounded-md bg-black border border-neutral-800 focus:outline-none focus:ring-1 focus:ring-red-600" />
               <div className="mt-3 flex gap-2">
-                <a className="px-3 py-2 rounded-md bg-neutral-800 hover:bg-neutral-700 text-sm" href={jobId ? `/screening/apply/${encodeURIComponent(jobId)}` : '#'} target="_blank" rel="noreferrer">Open Apply</a>
+                <a className="px-3 py-2 rounded-md bg-neutral-800 hover:bg-neutral-700 text-sm" href={jobId ? `${API}/screening/apply/${encodeURIComponent(jobId)}` : '#'} target="_blank" rel="noreferrer">Open Apply</a>
               </div>
             </div>
           </section>

@@ -11,7 +11,7 @@ const menuItems = [
   { name: "Performance Monitor", href: "#" },
   { name: "Auto Team Assembler", href: "#" },
   { name: "AI Interviewer", href: "/interviewer" },
-  { name: "Smart Access", href: "#" },
+  { name: "Smart Access", href: "/smart-access" },
 ];
 
 // CLIENT LOGOS
@@ -315,6 +315,8 @@ export const HeroSection = () => {
 import Login from "./pages/Login.jsx";
 import Main from "./pages/Main.jsx";
 import Interviewer from "./pages/Interviewer.jsx";
+import InterviewerNew from "./pages/InterviewerNew.jsx";
+import SmartAccess from "./pages/SmartAccess.jsx";
 
 export default function App() {
   return (
@@ -323,6 +325,8 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/main" element={<Main />} />
       <Route path="/interviewer" element={<Interviewer />} />
+      <Route path="/interviewer/new" element={<InterviewerNew />} />
+      <Route path="/smart-access" element={<SmartAccess />} />
     </Routes>
   );
 }

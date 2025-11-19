@@ -32,29 +32,65 @@ router = APIRouter()
 
 
 def page(title: str, body: str) -> str:
-    return f"""
+    head = """
 <!doctype html>
 <html>
 <head>
   <meta charset='utf-8'/>
-  <title>{title}</title>
+  <title>""" + str(title) + """</title>
   <style>
-    body{{font-family:system-ui, sans-serif; max-width:900px; margin:40px auto;}}
-    input,textarea,button,select{{padding:8px; margin:6px 0; width:100%;}}
-    label{{font-weight:600;}}
-    .row{{display:flex; gap:12px}}
-    .col{{flex:1}}
-    .card{{border:1px solid #e5e7eb; border-radius:8px; padding:16px; margin:12px 0;}}
-    .muted{{color:#6b7280; font-size:14px}}
-    pre{{background:#f6f8fa; padding:12px;}}
-    a.button{{display:inline-block; padding:8px 12px; background:#111827; color:white; border-radius:6px; text-decoration:none;}}
+    :root{--bg:#000; --card:#0b0b0b; --muted:#9ca3af; --fg:#fff; --accent:#7A0000; --accent2:#520000; --border:#1f2937}
+    *{box-sizing:border-box}
+    body{font-family:system-ui, sans-serif; margin:0; background:var(--bg); color:var(--fg);}
+    a{color:var(--accent)}
+    .container{max-width:1000px; margin:0 auto; padding:24px}
+    .header{position:sticky; top:0; z-index:5; background:linear-gradient(180deg, rgba(0,0,0,.9), rgba(0,0,0,.6)); border-bottom:1px solid var(--border)}
+    .brand{display:flex; align-items:center; gap:12px}
+    .logo{width:40px; height:40px; border:2px solid var(--accent); border-radius:10px; display:flex; align-items:center; justify-content:center; font-weight:700}
+    nav.actions a{color:#9ca3af; text-decoration:none}
+    input,textarea,button,select{padding:10px 12px; margin:8px 0; width:100%; background:#0f0f10; color:var(--fg); border:1px solid var(--border); border-radius:10px}
+    button{background:var(--accent); border:none; cursor:pointer}
+    button:hover{background:var(--accent2)}
+    .row{display:flex; gap:12px; flex-wrap:wrap}
+    .col{flex:1; min-width:220px}
+    .card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; margin:12px 0;}
+    .muted{color:var(--muted); font-size:14px}
+    pre{background:#0f0f10; padding:12px; border:1px solid var(--border); border-radius:10px; white-space:pre-wrap}
+    a.button{display:inline-block; padding:8px 12px; background:#111827; color:white; border-radius:6px; text-decoration:none;}
   </style>
 </head>
 <body>
-{body}
+  <div class="header">
+    <div class="container" style="display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 24px;">
+      <div class="brand"><div class="logo">JR</div><div class="title">J.A.R.V.I.S</div></div>
+      <nav class="actions" style="display:flex; gap:10px">
+        <a id="nav-home" href="/">Home</a>
+        <a id="nav-sa" href="/smart-access/admin">Smart Access</a>
+        <a id="nav-perf" href="/perf/ui">Performance Meter</a>
+        <a id="nav-autoteam" href="/autoteam">Auto Team</a>
+        <a id="nav-adv" href="/interviewer-advanced">Advanced Interviewer</a>
+        <a id="nav-screening" href="/screening/jobs">Screening Admin</a>
+      </nav>
+    </div>
+  </div>
+  <div class="container">
+"""
+    tail = """
+  </div>
+  <script>
+  (function(){
+    try{
+      const t = localStorage.getItem('token')||'';
+      const set=(id,href)=>{ const el=document.getElementById(id); if(el) el.href=href; };
+      set('nav-sa','/smart-access/admin' + (t? ('?token='+encodeURIComponent(t)) : ''));
+      set('nav-screening','/screening/jobs' + (t? ('?token='+encodeURIComponent(t)) : ''));
+    }catch(e){}
+  })();
+  </script>
 </body>
 </html>
 """
+    return head + str(body) + tail
 
 
 @router.get("/jobs", response_class=HTMLResponse)
@@ -127,25 +163,79 @@ async def apply_form(public_id: str):
         job = s.exec(select(Job).where(Job.public_id == public_id)).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    body = f"""
-    <h1>Apply: {job.title}</h1>
-    <p class='muted'>Provide your details below. Paste your resume text.</p>
-    <form method='post' enctype='multipart/form-data'>
-      <label>Name</label>
-      <input name='name' required placeholder='Your full name'/>
-      <label>Email</label>
-      <input name='email' type='email' required placeholder='you@example.com'/>
-      <label>Resume file (PDF/DOCX/TXT)</label>
-      <input type='file' name='resume_file' accept='.pdf,.docx,.txt'/>
-      <label>Resume (text)</label>
-      <textarea name='resume_text' rows='12' required placeholder='Paste your resume here...'></textarea>
-      <label>Additional info (optional)</label>
-      <textarea name='extra_inputs' rows='4' placeholder='Anything else we should know...'></textarea>
-      <button type='submit'>Submit</button>
-    </form>
-    <p class='muted'>Job ID: {job.public_id}</p>
+    themed = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'/>
+  <meta name='viewport' content='width=device-width, initial-scale=1'/>
+  <title>Apply • {job.title}</title>
+  <style>
+    :root{{--bg:#000;--card:#0b0b0c;--fg:#fff;--muted:#9ca3af;--border:#1f2937;--accent:#b91c1c;--accent-2:#7A0000}}
+    *{{box-sizing:border-box}}
+    body{{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial,Apple Color Emoji,Segoe UI Emoji}}
+    .container{{max-width:920px;margin:40px auto;padding:0 16px}}
+    .header{{display:flex;align-items:center;justify-content:space-between;padding:12px 0}}
+    .brand{{display:flex;gap:10px;align-items:center}}
+    .logo{{width:36px;height:36px;border-radius:8px;background:var(--accent)}}
+    .title{{font-weight:700;letter-spacing:.08em}}
+    .card{{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px}}
+    label{{display:block;font-size:13px;color:var(--muted);margin:10px 0 6px}}
+    input,textarea{{width:100%;background:#0f0f10;color:var(--fg);border:1px solid var(--border);border-radius:10px;padding:12px}}
+    input[type=file]{{padding:10px;background:#0f0f10}}
+    .hint{{color:var(--muted);font-size:13px}}
+    .btn{{display:inline-flex;align-items:center;gap:8px;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:10px 14px;cursor:pointer;text-decoration:none}}
+    .btn.gray{{background:#111827}}
+    .row{{display:flex;gap:14px;flex-wrap:wrap}}
+  </style>
+  <script>
+    function onFileChange(el){{
+      const txt = document.getElementById('resume_text');
+      if(el && el.files && el.files.length){{ txt.removeAttribute('required'); }} else {{ txt.setAttribute('required','required'); }}
+    }}
+  </script>
+  </head>
+  <body>
+    <div class='container'>
+      <div class='header'>
+        <div class='brand'>
+          <div class='logo'></div>
+          <div class='title'>J.A.R.V.I.S</div>
+        </div>
+        <div class='hint'>Secure AI Interview • Public Application</div>
+      </div>
+
+      <div class='card' style='margin-top:8px'>
+        <h2 style='margin:0 0 6px'>{job.title}</h2>
+        <div class='hint'>Job ID: {job.public_id}</div>
+        <p class='hint' style='margin-top:10px'>Provide your details below. You can upload a file or paste your resume text.</p>
+        <form method='post' enctype='multipart/form-data' style='margin-top:12px'>
+          <label>Name</label>
+          <input name='name' required placeholder='Your full name'/>
+          <label>Email</label>
+          <input name='email' type='email' required placeholder='you@example.com'/>
+          <div class='row'>
+            <div style='flex:1;min-width:240px'>
+              <label>Resume file (PDF/DOCX/TXT)</label>
+              <input type='file' name='resume_file' accept='.pdf,.docx,.txt' onchange='onFileChange(this)'/>
+            </div>
+            <div style='flex:1;min-width:240px'>
+              <label>Resume (text)</label>
+              <textarea id='resume_text' name='resume_text' rows='10' required placeholder='Paste your resume here...'></textarea>
+            </div>
+          </div>
+          <label>Additional info (optional)</label>
+          <textarea name='extra_inputs' rows='4' placeholder='Anything else we should know...'></textarea>
+          <div style='margin-top:14px'>
+            <button class='btn' type='submit'>Submit Application</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </body>
+ </html>
     """
-    return page(f"Apply: {job.title}", body)
+    return HTMLResponse(content=themed)
 
 
 @router.get("/jobs/{public_id}/candidates", response_class=HTMLResponse)
@@ -335,9 +425,16 @@ def parse_gemini_eval(text: str) -> tuple[Optional[float], Optional[str], Option
     # Expect JSON with fields: score (0-100), summary (string), fits (boolean)
     try:
         data = json.loads(text)
-        score = float(data.get("score")) if data.get("score") is not None else None
-        summary = data.get("summary")
-        fits = data.get("fits")
+        # score may be string/number
+        score_val = data.get("score")
+        try:
+            score = float(score_val) if score_val is not None else None
+        except Exception:
+            score = None
+        # accept different keys for summary
+        summary = data.get("summary") or data.get("reason") or data.get("rationale")
+        # accept different keys for fit/fits
+        fits = data.get("fits") if data.get("fits") is not None else data.get("fit")
         if isinstance(fits, str):
             fits = fits.strip().lower() in {"true", "yes", "y", "1"}
         return score, summary, fits
@@ -351,7 +448,12 @@ def parse_gemini_eval(text: str) -> tuple[Optional[float], Optional[str], Option
     if m_fit:
         fits = m_fit.group(2).lower() in {"yes", "true"}
     # crude summary as whole text
-    summary = text.strip()
+    # try to capture a reason/summary segment if present
+    m_reason = re.search(r"(reason|rationale|summary)\s*[:\-]\s*(.+)", text, re.I | re.S)
+    if m_reason:
+        summary = m_reason.group(2).strip()
+    else:
+        summary = text.strip()
     return score, summary, fits
 
 
@@ -450,20 +552,46 @@ async def apply_submit(
         s.commit()
         s.refresh(cand)
 
-    body = f"""
-    <h1>Application submitted</h1>
-    <p>Thank you, {name}. We have recorded your application.</p>
-    <div class='card'>
-      <h3>Automated screening</h3>
-      <p><strong>Score:</strong> {score if score is not None else 'N/A'}</p>
-      <p><strong>Fits:</strong> {fits if fits is not None else 'N/A'}</p>
-      <details><summary>Summary</summary><pre>{(summary or 'N/A')}</pre></details>
+    themed = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'/>
+  <meta name='viewport' content='width=device-width, initial-scale=1'/>
+  <title>Application submitted</title>
+  <style>
+    :root{{--bg:#000;--card:#0b0b0c;--fg:#fff;--muted:#9ca3af;--border:#1f2937;--accent:#b91c1c}}
+    *{{box-sizing:border-box}}
+    body{{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial}}
+    .container{{max-width:820px;margin:40px auto;padding:0 16px}}
+    .card{{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px}}
+    .btn{{display:inline-block;background:var(--accent);color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;margin-right:8px}}
+    .hint{{color:var(--muted);font-size:14px}}
+    pre{{white-space:pre-wrap;background:#0f0f10;border:1px solid var(--border);border-radius:10px;padding:12px;color:var(--fg)}}
+  </style>
+  </head>
+  <body>
+    <div class='container'>
+      <h1 style='margin:0 0 10px'>Thank you, {name}!</h1>
+      <p class='hint'>We have recorded your application.</p>
+      <div class='card' style='margin-top:14px'>
+        <h3 style='margin:0 0 8px'>Automated screening</h3>
+        <p><strong>Score:</strong> {score if score is not None else 'N/A'}</p>
+        <p><strong>Fits:</strong> {('Yes' if fits else ('No' if fits is not None else 'N/A'))}</p>
+        <details open><summary>Summary</summary><pre>{(summary or 'N/A')}</pre></details>
+      </div>
+      <div style='margin-top:16px'>
+        <div class='hint'>You can check your application status any time here:</div>
+        <div style='margin-top:8px'>
+          <a class='btn' href='/screening/candidates/{cand.candidate_public_id}' target='_blank'>View my application</a>
+          <a class='btn' style='background:#111827' href='/screening/apply/{public_id}'>Back</a>
+        </div>
+      </div>
     </div>
-    <p>You can check your application status any time here:</p>
-    <p><a class='button' href='/screening/candidates/{cand.candidate_public_id}' target='_blank'>View my application</a></p>
-    <p class='muted'><a href='/screening/apply/{public_id}'>Back</a></p>
+  </body>
+ </html>
     """
-    return page("Application submitted", body)
+    return HTMLResponse(content=themed)
 
 
 # === JSON APIs for React-native Interviewer UI ===

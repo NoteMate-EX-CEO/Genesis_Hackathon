@@ -2,11 +2,16 @@ import os
 import io
 import threading
 import subprocess
+import sys
+from pathlib import Path
 from typing import List
+import requests
+import json
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from starlette.middleware.wsgi import WSGIMiddleware
 from pydantic import BaseModel
 
 from app import auth
@@ -44,6 +49,76 @@ app.add_middleware(
 )
 app.include_router(screening.router, prefix="/screening")
 app.include_router(smart_access.router)
+
+_PERF_MOUNTED = False
+# Mount Performance Meter (Flask) at /perf via WSGI
+# Add its src path to sys.path, then import the Flask app and mount it.
+try:
+    perf_src = Path(__file__).resolve().parent / "Performance_Meter" / "src"
+    if str(perf_src) not in sys.path:
+        sys.path.append(str(perf_src))
+    from perfmeter.api import APP as PERF_FLASK_APP, _db_init  # type: ignore
+    _db_init()
+    app.mount("/perf", WSGIMiddleware(PERF_FLASK_APP))
+    _PERF_MOUNTED = True
+except Exception:
+    # If unavailable (e.g., missing Windows deps), skip mounting gracefully
+    _PERF_MOUNTED = False
+
+if not _PERF_MOUNTED:
+    @app.get("/perf/ui", response_class=HTMLResponse)
+    async def perf_ui_fallback():
+        return """
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'/>
+  <title>Performance Meter — J.A.R.V.I.S</title>
+  <style>
+    :root{--bg:#000; --card:#0b0b0b; --muted:#9ca3af; --fg:#fff; --accent:#7A0000; --accent2:#520000; --border:#1f2937}
+    body{font-family:system-ui,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
+    .container{max-width:860px;margin:0 auto;padding:24px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="container" style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 24px;">
+      <div class="brand"><div class="logo">JR</div><div class="title">Upload Documents</div></div>
+      <nav class="actions" style="display:flex; gap:10px">
+        <a id="nav-home" href="/" style="color:#9ca3af">Home</a>
+        <a id="nav-sa" href="/smart-access/admin" style="color:#9ca3af">Smart Access</a>
+        <a id="nav-perf" href="/perf/ui" style="color:#9ca3af">Performance Meter</a>
+        <a id="nav-autoteam" href="/autoteam" style="color:#9ca3af">Auto Team</a>
+        <a id="nav-adv" href="/interviewer-advanced" style="color:#9ca3af">Advanced Interviewer</a>
+        <a id="nav-screening" href="/screening/jobs" style="color:#9ca3af">Screening Admin</a>
+      </nav>
+    </div>
+  </div>
+  <div class="container">
+    <div class="card">
+      <h1 style="margin-top:0">Performance Meter</h1>
+      <p class="muted">The embedded Flask app could not be mounted on this host (likely due to OS-specific dependencies). You can still use the rest of J.A.R.V.I.S.</p>
+      <p>To enable this module, run on Windows or install the required desktop hooks, then restart the backend.</p>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+# Try to import Whisper/Gemini summarizer and recorder for Advanced AI Interviewer
+_HAS_ADV_SUMMARY = False
+_HAS_ADV_RECORD = False
+try:
+    whisper_path = Path(__file__).resolve().parent / "whisper-large_v3"
+    if str(whisper_path) not in sys.path:
+        sys.path.append(str(whisper_path))
+    from segment_transcribe import summarize_with_gemini, build_ffmpeg_audio_cmd, transcribe_loop  # type: ignore
+    _HAS_ADV_SUMMARY = True
+    _HAS_ADV_RECORD = True
+except Exception:
+    _HAS_ADV_SUMMARY = False
+    _HAS_ADV_RECORD = False
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
@@ -283,10 +358,14 @@ async def demo():
         <div class="logo">JR</div>
         <div class="title">J.A.R.V.I.S</div>
       </div>
-      <div class="actions">
-        <button class="btn-secondary" onclick="openScreening()">Screening Admin</button>
-        <button class="btn-secondary" onclick="openSmartAccess()">Smart Access</button>
-      </div>
+      <nav class="actions" style="display:flex; gap:10px">
+        <a id="nav-home" href="/" style="color:#9ca3af">Home</a>
+        <a id="nav-sa" href="/smart-access/admin" style="color:#9ca3af">Smart Access</a>
+        <a id="nav-perf" href="/perf/ui" style="color:#9ca3af">Performance Meter</a>
+        <a id="nav-autoteam" href="/autoteam" style="color:#9ca3af">Auto Team</a>
+        <a id="nav-adv" href="/interviewer-advanced" style="color:#9ca3af">Advanced Interviewer</a>
+        <a id="nav-screening" href="/screening/jobs" style="color:#9ca3af">Screening Admin</a>
+      </nav>
     </div>
   </div>
   <div class="container" style="padding-top:24px">
@@ -342,6 +421,19 @@ async function bootstrapUser(){
   const meTxt = await me.text();
   try { const m = JSON.parse(meTxt); employeeId = m.username || ''; await setupProjects(); } catch(e) { /* ignore */ }
   startSmartAccessCollector();
+}
+
+function setupNav(){
+  try{
+    const t = localStorage.getItem('token')||'';
+    const set = (id, href) => { const el = document.getElementById(id); if(el){ el.href = href; } };
+    set('nav-home','/');
+    set('nav-sa','/smart-access/admin' + (t ? ('?token='+encodeURIComponent(t)) : ''));
+    set('nav-perf','/perf/ui');
+    set('nav-autoteam','/autoteam');
+    set('nav-adv','/interviewer-advanced');
+    set('nav-screening','/screening/jobs' + (t ? ('?token='+encodeURIComponent(t)) : ''));
+  }catch(e){}
 }
 
 function openScreening(){
@@ -433,11 +525,328 @@ async function doQuery(){
   chat.scrollTop = chat.scrollHeight;
 }
 bootstrapUser();
+setupNav();
 </script>
 </body>
 </html>
 """
+@app.get("/interviewer-advanced", response_class=HTMLResponse)
+async def interviewer_advanced_ui():
+    warn_msg = 'Enabled' if _HAS_ADV_SUMMARY else 'Note: Gemini summarizer available. Upload/paste transcript to summarize.'
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'/>
+  <title>Advanced AI Interviewer — J.A.R.V.I.S</title>
+  <style>
+    :root{--bg:#000; --card:#0b0b0b; --muted:#9ca3af; --fg:#fff; --accent:#7A0000; --accent2:#520000; --border:#1f2937}
+    body{font-family:system-ui,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
+    .container{max-width:900px;margin:0 auto;padding:24px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+    input,button,textarea{padding:10px 12px;margin:8px 0;width:100%;background:#0f0f10;color:var(--fg);border:1px solid var(--border);border-radius:10px}
+    button{background:var(--accent);border:none;cursor:pointer}
+    button:hover{background:var(--accent2)}
+    .header{position:sticky;top:0;z-index:5;background:linear-gradient(180deg,rgba(0,0,0,.9),rgba(0,0,0,.6));border-bottom:1px solid var(--border)}
+    .brand{display:flex;align-items:center;gap:12px}
+    .logo{width:40px;height:40px;border:2px solid var(--accent);border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:700}
+    pre{background:#0f0f10;padding:12px;border:1px solid var(--border);border-radius:10px;white-space:pre-wrap}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="container" style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 24px;">
+      <div class="brand"><div class="logo">JR</div><div class="title">Advanced AI Interviewer</div></div>
+      <nav class="actions" style="display:flex; gap:10px">
+        <a id="nav-home" href="/" style="color:#9ca3af">Home</a>
+        <a id="nav-sa" href="/smart-access/admin" style="color:#9ca3af">Smart Access</a>
+        <a id="nav-perf" href="/perf/ui" style="color:#9ca3af">Performance Meter</a>
+        <a id="nav-autoteam" href="/autoteam" style="color:#9ca3af">Auto Team</a>
+        <a id="nav-adv" href="/interviewer-advanced" style="color:#9ca3af">Advanced Interviewer</a>
+        <a id="nav-screening" href="/screening/jobs" style="color:#9ca3af">Screening Admin</a>
+      </nav>
+    </div>
+  </div>
+  <div class="container" style="padding-top:24px">
+    <div class="card">
+      <h2 style="margin:0 0 8px 0">Transcript</h2>
+      <textarea id="txt" rows="8" placeholder="Paste transcript here..."></textarea>
+      <div>Or upload .txt transcript: <input id="file" type="file" accept=".txt,text/plain" style="width:auto"/></div>
+      <button onclick="summarize()">Summarize</button>
+      <div id="warn" style="color:#fbbf24;font-size:12px;margin-top:6px;">""" + warn_msg + """</div>
+     </div>
+     <div class="card" style="margin-top:16px;">
+       <h2 style="margin:0 0 8px 0">Summary</h2>
+       <pre id="out"></pre>
+     </div>
+     <div class="card" style="margin-top:16px;">
+      <h2 style="margin:0 0 8px 0">Live Record (Windows dshow/wasapi)</h2>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">
+        <div><label>Mic name<input id="mic" placeholder="@device_cm_...\\wave_... or device name"/></label></div>
+        <div><label>Speaker name<input id="spk" placeholder="Stereo Mix ... or @device_cm_..."/></label></div>
+        <div><label>Speaker API<select id="api"><option value="wasapi">wasapi</option><option value="dshow">dshow</option></select></label></div>
+        <div><label>Model<input id="model" value="small.en"/></label></div>
+        <div><label>Segment (s)<input id="seg" value="5"/></label></div>
+        <div><label>Keep last<input id="keep" value="10"/></label></div>
+      </div>
+      <div style="display:flex; gap:8px; margin-top:8px">
+        <button onclick="recStart()" {'disabled' if not _HAS_ADV_RECORD else ''}>Start Recording</button>
+        <button onclick="recStop()">Stop & Summarize</button>
+        <button onclick="recStatus()">Status</button>
+      </div>
+      <pre id="status" style="margin-top:8px"></pre>
+    </div>
+   </div>
+  <script>
+  // token-aware nav
+  (function(){
+    try{
+      const t = localStorage.getItem('token')||'';
+      const set=(id,href)=>{ const el=document.getElementById(id); if(el) el.href=href; };
+      set('nav-sa','/smart-access/admin' + (t? ('?token='+encodeURIComponent(t)) : ''));
+      set('nav-screening','/screening/jobs' + (t? ('?token='+encodeURIComponent(t)) : ''));
+    }catch(e){}
+  })();
+  async function summarize(){
+    const out=document.getElementById('out'); out.textContent='';
+    const ta=document.getElementById('txt'); const f=document.getElementById('file');
+    const fd=new FormData(); if(ta.value.trim()) fd.append('transcript_text', ta.value.trim()); if(f.files && f.files[0]) fd.append('file', f.files[0]);
+    const r = await fetch('/interviewer-advanced/summary', { method:'POST', body: fd }); const data = await r.json().catch(()=>({ok:false,error:'Bad JSON'}));
+    out.textContent = (data.summary || data.error || JSON.stringify(data));
+  }
+  async function recStart(){
+    const status = document.getElementById('status');
+    const body = {
+      mic_name: document.getElementById('mic').value||null,
+      speaker_name: document.getElementById('spk').value||null,
+      speaker_api: document.getElementById('api').value||'wasapi',
+      segment_time: parseInt(document.getElementById('seg').value||'5'),
+      model: document.getElementById('model').value||'small.en',
+      keep_last: parseInt(document.getElementById('keep').value||'10')
+    };
+    const r = await fetch('/interviewer-advanced/record/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    status.textContent = await r.text();
+  }
+  async function recStop(){
+    const status = document.getElementById('status');
+    const r = await fetch('/interviewer-advanced/record/stop', { method:'POST' });
+    const data = await r.json().catch(()=>({ok:false}));
+    status.textContent = JSON.stringify(data, null, 2);
+    if(data.summary){ document.getElementById('out').textContent = data.summary; }
+  }
+  async function recStatus(){
+    const status = document.getElementById('status');
+    const r = await fetch('/interviewer-advanced/record/status');
+    status.textContent = await r.text();
+  }
+  </script>
+</body>
+</html>
+"""
 
+@app.post("/interviewer-advanced/summary")
+async def interviewer_advanced_summary(
+    transcript_text: str = Form(default=""),
+    file: UploadFile | None = File(default=None),
+):
+    # Prefer uploaded file, else use pasted text
+    raw = (transcript_text or "").strip()
+    if file is not None:
+        try:
+            raw = (await file.read()).decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+    if not raw:
+        return {"ok": False, "error": "Empty transcript"}
+    # Write to temp path under whisper-large_v3/output and call summarizer
+    base = Path(__file__).resolve().parent / "whisper-large_v3"
+    out_dir = base / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = out_dir / "web_transcript.txt"
+    summary_path = out_dir / "web_summary.txt"
+    transcript_path.write_text(raw, encoding="utf-8")
+    summary_text = None
+    if _HAS_ADV_SUMMARY:
+        try:
+            summary_text = summarize_with_gemini(transcript_path, summary_path)  # type: ignore
+        except Exception:
+            summary_text = None
+    if not summary_text:
+        # Fallback: use our configured Gemini client directly
+        model = genai.GenerativeModel(MODEL_NAME)
+        prompt = (
+            "You are an interview analyst. Summarize this transcript into sections: Communication style; Reasoning and coherence; Topics and interests; Sentiment and attitude; Risks; Verdict (2-3 sentences).\n\n" + raw
+        )
+        resp = model.generate_content(prompt)
+        summary_text = getattr(resp, "text", "") or ""
+    return {"ok": True, "summary": summary_text}
+
+# ---- Advanced recorder endpoints ----
+_ADV_STATE = { 'proc': None, 'thread': None, 'stop_event': None, 'running': False }
+
+@app.post("/interviewer-advanced/record/start")
+async def adv_record_start(payload: dict):
+    if not _HAS_ADV_RECORD:
+        return HTMLResponse("Recorder not available on this host", status_code=501)
+    if _ADV_STATE['running']:
+        return HTMLResponse("Already running", status_code=400)
+    mic_name = payload.get('mic_name') or None
+    speaker_name = payload.get('speaker_name') or None
+    speaker_api = str(payload.get('speaker_api') or 'wasapi')
+    segment_time = int(payload.get('segment_time') or 5)
+    model = str(payload.get('model') or 'small.en')
+    keep_last = int(payload.get('keep_last') or 10)
+    base = Path(__file__).resolve().parent / "whisper-large_v3"
+    chunks = base / "chunks"
+    transcript = base / "output" / "transcript.txt"
+    chunks.mkdir(parents=True, exist_ok=True)
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    out_pattern = str(chunks / "seg_%06d.wav")
+    # build ffmpeg command
+    try:
+        cmd = build_ffmpeg_audio_cmd(speaker_api=speaker_api, mic_name=mic_name, speaker_name=speaker_name, out_pattern=out_pattern, segment_time=segment_time)  # type: ignore
+    except Exception as e:
+        return HTMLResponse(f"Failed to build capture cmd: {e}", status_code=400)
+    # start ffmpeg and transcriber
+    stop_event = threading.Event()
+    proc = subprocess.Popen(cmd)
+    thread = threading.Thread(target=transcribe_loop, args=(model, chunks, transcript, keep_last, stop_event), daemon=True)
+    thread.start()
+    _ADV_STATE.update({'proc': proc, 'thread': thread, 'stop_event': stop_event, 'running': True})
+    return HTMLResponse("Started", status_code=200)
+
+@app.post("/interviewer-advanced/record/stop")
+async def adv_record_stop():
+    if not _HAS_ADV_RECORD:
+        return { 'ok': False, 'error': 'Recorder not available' }
+    if not _ADV_STATE['running']:
+        return { 'ok': False, 'error': 'Not running' }
+    try:
+        _ADV_STATE['stop_event'].set()  # type: ignore
+        proc = _ADV_STATE['proc']
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+        th = _ADV_STATE['thread']
+        if th:
+            th.join(timeout=3)
+    finally:
+        _ADV_STATE.update({'proc': None, 'thread': None, 'stop_event': None, 'running': False})
+    # summarize the captured transcript
+    base = Path(__file__).resolve().parent / "whisper-large_v3"
+    transcript_path = base / "output" / "transcript.txt"
+    summary_path = base / "output" / "summary.txt"
+    summary_text = None
+    if _HAS_ADV_SUMMARY:
+        try:
+            summary_text = summarize_with_gemini(transcript_path, summary_path)  # type: ignore
+        except Exception:
+            summary_text = None
+    if not summary_text:
+        try:
+            raw = transcript_path.read_text('utf-8') if transcript_path.exists() else ''
+        except Exception:
+            raw = ''
+        model_g = genai.GenerativeModel(MODEL_NAME)
+        resp = model_g.generate_content("Summarize interview:\n\n" + (raw or ''))
+        summary_text = getattr(resp, 'text', '') or ''
+    return { 'ok': True, 'summary': summary_text }
+
+@app.get("/interviewer-advanced/record/status")
+async def adv_record_status():
+    running = bool(_ADV_STATE.get('running'))
+    return HTMLResponse(f"running={running}")
+
+
+class AutoTeamRequest(BaseModel):
+    prompt: str
+    include_employees: bool = False
+
+@app.get("/autoteam", response_class=HTMLResponse)
+async def autoteam_ui():
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'/>
+  <title>Auto Team Assembler — J.A.R.V.I.S</title>
+  <style>
+    :root{--bg:#000; --card:#0b0b0b; --muted:#9ca3af; --fg:#fff; --accent:#7A0000; --accent2:#520000; --border:#1f2937}
+    body{font-family:system-ui,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
+    .container{max-width:900px;margin:0 auto;padding:24px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+    input,button,textarea{padding:10px 12px;margin:8px 0;width:100%;background:#0f0f10;color:var(--fg);border:1px solid var(--border);border-radius:10px}
+    button{background:var(--accent);border:none;cursor:pointer}
+    button:hover{background:var(--accent2)}
+    .header{position:sticky;top:0;z-index:5;background:linear-gradient(180deg,rgba(0,0,0,.9),rgba(0,0,0,.6));border-bottom:1px solid var(--border)}
+    .brand{display:flex;align-items:center;gap:12px}
+    .logo{width:40px;height:40px;border:2px solid var(--accent);border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:700}
+    pre{background:#0f0f10;padding:12px;border:1px solid var(--border);border-radius:10px;white-space:pre-wrap}
+    label{display:flex;align-items:center;gap:8px}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="container" style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 24px;">
+      <div class="brand"><div class="logo">JR</div><div class="title">Auto Team Assembler</div></div>
+      <nav class="actions" style="display:flex; gap:10px">
+        <a id="nav-home" href="/" style="color:#9ca3af">Home</a>
+        <a id="nav-sa" href="/smart-access/admin" style="color:#9ca3af">Smart Access</a>
+        <a id="nav-perf" href="/perf/ui" style="color:#9ca3af">Performance Meter</a>
+        <a id="nav-autoteam" href="/autoteam" style="color:#9ca3af">Auto Team</a>
+        <a id="nav-adv" href="/interviewer-advanced" style="color:#9ca3af">Advanced Interviewer</a>
+        <a id="nav-screening" href="/screening/jobs" style="color:#9ca3af">Screening Admin</a>
+      </nav>
+    </div>
+  </div>
+  <div class="container" style="padding-top:24px">
+    <div class="card">
+      <h2 style="margin:0 0 8px 0">Prompt</h2>
+      <textarea id="prompt" rows="6" placeholder="Describe the team you need: roles, skills, constraints..."></textarea>
+      <label><input id="include" type="checkbox"/> Include employees.json if available</label>
+      <button onclick="send()">Send</button>
+    </div>
+    <div class="card" style="margin-top:16px;">
+      <h2 style="margin:0 0 8px 0">Result</h2>
+      <pre id="out"></pre>
+    </div>
+  </div>
+  <script>
+  async function send(){
+    const out = document.getElementById('out'); out.textContent='';
+    const r = await fetch('/autoteam/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prompt: document.getElementById('prompt').value||'', include_employees: document.getElementById('include').checked})});
+    const data = await r.json().catch(()=>({ok:false,error:'Bad JSON'}));
+    out.textContent = data.text || data.error || JSON.stringify(data);
+  }
+  </script>
+</body>
+</html>
+"""
+
+@app.post("/autoteam/chat")
+async def autoteam_chat(req: AutoTeamRequest):
+    prompt = (req.prompt or '').strip()
+    if not prompt:
+        return {"ok": False, "error": "Empty prompt"}
+    ctx = ''
+    if req.include_employees:
+        try:
+            epath = Path(__file__).resolve().parent / 'bitshackathoncode' / 'employees.json'
+            if epath.exists():
+                ctx = "\n\nEmployees JSON (for context):\n" + epath.read_text(encoding='utf-8')
+        except Exception:
+            ctx = ''
+    model = genai.GenerativeModel(MODEL_NAME)
+    full = "You are an expert team assembler. Given the request, propose a team with roles, names/emails (if provided), and justification. Use Markdown tables for team lists.\n\nRequest:\n" + prompt + ctx
+    try:
+        resp = model.generate_content(full)
+        text = getattr(resp, 'text', '') or ''
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "text": text}
 
 @app.get("/demo/upload", response_class=HTMLResponse)
 async def demo_upload():
@@ -464,6 +873,12 @@ async def demo_upload():
     token = localStorage.getItem('token')||'';
     await populateProjects();
     const proj = getParam('project'); if(proj){ const sel=document.getElementById('project'); for(const o of sel.options){ if(o.value===proj){ sel.value=proj; break; } } }
+    // nav token-aware
+    try{
+      const set=(id,href)=>{ const el=document.getElementById(id); if(el) el.href=href; };
+      set('nav-sa','/smart-access/admin' + (token? ('?token='+encodeURIComponent(token)) : ''));
+      set('nav-screening','/screening/jobs' + (token? ('?token='+encodeURIComponent(token)) : ''));
+    }catch(e){}
   }
   async function populateProjects(){
     try{
